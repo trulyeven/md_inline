@@ -27,12 +27,20 @@ export interface DecorationRange {
 type PushRangeFn = (start: number, end: number, type: DecorationType,
     opts?: { metadata?: any, blockId?: string, activeRangeStart?: number, activeRangeEnd?: number }) => void;
 
+/**
+ * MarkdownParser handles parsing Markdown text into a set of decoration ranges.
+ * It uses unified/remark to build an AST and then visits nodes to apply styles
+ */
 export class MarkdownParser {
     private processor: any;
     private lastText: string = '';
     private lastRanges: DecorationRange[] = [];
     private handlers: Record<string, (node: any, ancestors: Node[], text: string, pushRange: PushRangeFn) => void>;
 
+    /**
+     * Initialize the unified processor with remark-parse and remark-gfm.
+     * Sets up handlers for various Markdown node types
+     */
     constructor() {
         this.processor = unified()
             .use(remarkParse)
@@ -54,6 +62,10 @@ export class MarkdownParser {
         };
     }
 
+    /**
+     * Parses the given Markdown text and returns an array of DecorationRange objects
+     * Uses caching to skip parsing if the text hasn't changed
+    **/
     public parse(text: string): DecorationRange[] {
         if (!text) { return []; }
         if (text === this.lastText) {
@@ -105,7 +117,12 @@ export class MarkdownParser {
 
                 const handler = this.handlers[node.type];
                 if (handler) {
-                    handler(node, ancestors, text, pushRange);
+                    const blockId = this.getFormattingRootId(node, ancestors);
+                    // Use a wrapped push function to automatically inject the clustered blockId
+                    const wrappedPush: PushRangeFn = (start, end, type, opts = {}) => {
+                        pushRange(start, end, type, { blockId, ...opts });
+                    };
+                    handler(node, ancestors, text, wrappedPush);
                 }
             });
         } catch (e) {
@@ -117,6 +134,36 @@ export class MarkdownParser {
         return ranges;
     }
 
+    /**
+     * Determines a shared blockId for nested inline formatting elements
+     */
+    private getFormattingRootId(node: Node, ancestors: Node[]): string | undefined {
+        const formattingTypes = ['strong', 'emphasis', 'delete', 'link', 'inlineCode', 'heading', 'image'];
+        if (!formattingTypes.includes(node.type)) {
+            return undefined;
+        }
+
+        let root = node;
+        for (let i = ancestors.length - 1; i >= 0; i--) {
+            const ancestor = ancestors[i];
+            if (formattingTypes.includes(ancestor.type)) {
+                root = ancestor;
+            } else if (['paragraph', 'listItem', 'tableCell', 'blockquote', 'list', 'root'].includes(ancestor.type)) {
+                // Formatting cluster boundary
+                break;
+            }
+        }
+
+        if (root.position?.start?.offset !== undefined) {
+            return `inline-${root.position.start.offset}`;
+        }
+        return undefined;
+    }
+
+    /**
+     * Process bold text (e.g., **text** or __text__).
+     * Hides the markers and applies the 'bold' decoration to the content.
+     */
     private processBold(text: string, pushRange: PushRangeFn, start: number, end: number) {
         // Strong is always 2 characters (** or __).
         // If it's ***, AST treats it as Strong(**) + Emphasis(*) inside.
@@ -125,6 +172,10 @@ export class MarkdownParser {
         pushRange(end - 2, end, 'hide', { activeRangeStart: start, activeRangeEnd: end });
     }
 
+    /**
+     * Process italic text (e.g., *text* or _text_).
+     * Hides the markers and applies the 'italic' decoration to the content.
+     */
     private processItalic(text: string, pushRange: PushRangeFn, start: number, end: number) {
         // Emphasis is always 1 character (* or _).
         pushRange(start, start + 1, 'hide', { activeRangeStart: start, activeRangeEnd: end });
@@ -132,12 +183,20 @@ export class MarkdownParser {
         pushRange(end - 1, end, 'hide', { activeRangeStart: start, activeRangeEnd: end });
     }
 
+    /**
+     * Process strikethrough text (e.g., ~~text~~).
+     * Hides the markers and applies the 'strikethrough' decoration.
+     */
     private processStrikethrough(text: string, pushRange: PushRangeFn, start: number, end: number) {
         pushRange(start, start + 2, 'hide', { activeRangeStart: start, activeRangeEnd: end });
         pushRange(start + 2, end - 2, 'strikethrough', { activeRangeStart: start, activeRangeEnd: end });
         pushRange(end - 2, end, 'hide', { activeRangeStart: start, activeRangeEnd: end });
     }
 
+    /**
+     * Process Markdown headings (# H1, ## H2, etc.).
+     * Hides the marker part (e.g., '### ') and applies a heading-specific decoration.
+     */
     private processHeading(heading: Heading, text: string, pushRange: PushRangeFn, start: number, end: number) {
         const level = heading.depth;
         const headingType = `heading${level}` as DecorationType;
@@ -151,6 +210,10 @@ export class MarkdownParser {
         }
     }
 
+    /**
+     * Process Markdown links [label](url).
+     * Hides the brackets and URL part, styling only the label.
+     */
     private processLink(text: string, pushRange: PushRangeFn, start: number, end: number) {
         const raw = text.substring(start, end);
         const closingBracketIdx = raw.lastIndexOf('](');
@@ -162,6 +225,10 @@ export class MarkdownParser {
         }
     }
 
+    /**
+     * Process Markdown images ![alt](url).
+     * Provides metadata for the decorator to render an image preview or anchor.
+     */
     private processImage(node: Image, text: string, pushRange: PushRangeFn, start: number, end: number, ancestors: Node[]) {
         const url = node.url;
         const alt = node.alt;
@@ -178,6 +245,10 @@ export class MarkdownParser {
     // pushRange(start + 1, end - 1, 'code', { activeRangeStart: start, activeRangeEnd: end });
     // pushRange(end - 1, end, 'hide', { activeRangeStart: start, activeRangeEnd: end });
 
+    /**
+     * Process inline code (e.g., `code`).
+     * Hides backticks and applies the 'code' background decoration.
+     */
     private processInlineCode(text: string, pushRange: PushRangeFn, start: number, end: number) {
         let openLen = 0;
         while (start + openLen < end && text[start + openLen] === '`') {
@@ -198,6 +269,10 @@ export class MarkdownParser {
         }
     }
 
+    /**
+     * Process fenced code blocks (```lang ... ```).
+     * Hides the start/end fences and applies 'codeBlock' styling to the whole range.
+     */
     private processCodeBlock(node: Code, text: string, pushRange: PushRangeFn, start: number, end: number) {
         const blockId = `code-${start}`;
         const firstNewline = text.indexOf('\n', start);
@@ -211,6 +286,9 @@ export class MarkdownParser {
         pushRange(start, end, 'codeBlock', { blockId });
     }
 
+    /**
+     * Process Markdown tables. 
+     */
     private processTable(node: Table, text: string, pushRange: PushRangeFn, start: number, end: number) {
         const blockId = `table-${start}`;
 
@@ -235,7 +313,7 @@ export class MarkdownParser {
         };
 
         const colWidths: number[] = [];
-        const visibleTexts = new Map<any, string>(); // 성능 향상을 위해 각 셀의 visibleText 결과를 캐싱
+        const visibleTexts = new Map<any, string>();
 
         node.children.forEach(row => {
             row.children.forEach((cell, i) => {
@@ -244,68 +322,52 @@ export class MarkdownParser {
                 colWidths[i] = Math.max(colWidths[i] || 3, visualLength(visibleText));
             });
         });
-        const totalTableWidth = colWidths.reduce((a, b) => a + b + 4, 0); // 각 셀마다 4칸의 패딩(좌2, 우2)
-        
-        // 구분선(Separator) 라인 완벽히 숨김 처리 (불필요한 split('\n') 배열 할당 제거)
+        const totalTableWidth = colWidths.reduce((a, b) => a + b + 4, 0);
         const firstNewlineIdx = text.indexOf('\n', start);
         const secondNewlineIdx = firstNewlineIdx !== -1 ? text.indexOf('\n', firstNewlineIdx + 1) : -1;
         const sepEnd = secondNewlineIdx !== -1 && secondNewlineIdx < end ? secondNewlineIdx + 1 : end;
 
         if (firstNewlineIdx !== -1 && firstNewlineIdx < end) {
             const sepLine = text.substring(firstNewlineIdx + 1, sepEnd);
-            // 유연한 마크다운 구분선 정규식
+            // Markdown Separator Line
             if (sepLine.trim().match(/^\|?(\s*:?-+:?\s*\|?)+$/)) {
-                // hide 속성(0px)이 포함된 tableHeaderRow는 다음 줄에 절대 닿으면 안 됨
                 const visualEnd = secondNewlineIdx !== -1 ? secondNewlineIdx : sepEnd;
-                pushRange(firstNewlineIdx + 1, visualEnd, 'tableHeaderRow', { 
-                    blockId, 
+                pushRange(firstNewlineIdx + 1, visualEnd, 'tableHeaderRow', {
+                    blockId,
                     metadata: { totalWidth: totalTableWidth },
-                    activeRangeStart: start, 
-                    activeRangeEnd: end 
+                    activeRangeStart: start,
+                    activeRangeEnd: end
                 });
             }
         }
 
-        // 2. 각 셀 처리 및 렌더링 범위 지정
+        // Other Rows
         node.children.forEach((row, rowIndex) => {
             const rowStart = row.position?.start?.offset;
             const rowEnd = row.position?.end?.offset;
 
-            // 헤더(0)와 구분자 다음 행들만 처리
-            // 실제 텍스트에서 해당 행이 | 로 시작/포함하는지 검증
             if (rowIndex > 0) {
                 if (rowStart !== undefined && rowEnd !== undefined) {
                     const rawLine = text.substring(rowStart, rowEnd);
-                    // | 가 없는 줄은 유효하지 않은 테이블 행 → 스킵
                     if (!rawLine.includes('|')) {
                         return;
                     }
                 }
             }
 
-            // 행 단위 가로선 적용 (isWholeLine: true 장식)
+            // Row Line
             if (rowStart !== undefined && rowEnd !== undefined) {
                 if (rowIndex > 0) {
-                    // 데이터 행의 가로선은 "다음 행"의 상단 테두리(border-top)로 구현
                     const nextRow = node.children[rowIndex + 1];
                     if (nextRow && nextRow.position?.start?.offset !== undefined && nextRow.position?.end?.offset !== undefined) {
-                        // [수정] 다음 행이 실제로 테이블 행인지(파이프 포함 여부) 확인
-                        const nextRowStart = nextRow.position.start.offset;
-                        const nextRowEnd = nextRow.position.end.offset;
-                        const nextRowText = text.substring(nextRowStart, nextRowEnd);
-                        
-                        if (nextRowText.includes('|')) {
-                            // 유효한 다음 테이블 행이 있을 때만 가로선 적용
-                            pushRange(nextRowStart, nextRowStart, 'tableRow', {
-                                blockId,
-                                metadata: { totalWidth: totalTableWidth },
-                                activeRangeStart: start,
-                                activeRangeEnd: end
-                            });
-                        }
+                        pushRange(nextRow.position.start.offset, nextRow.position.start.offset, 'tableRow', {
+                            blockId,
+                            metadata: { totalWidth: totalTableWidth },
+                            activeRangeStart: start,
+                            activeRangeEnd: end
+                        });
                     }
                 }
-                // rowIndex === 0 (헤더 행)은 위에서 처리한 구분선(Separator)의 테두리가 가로선 역할을 하므로 생략
             }
 
             row.children.forEach((cell, i) => {
@@ -327,43 +389,34 @@ export class MarkdownParser {
                         innerEnd = lastChildPos.end.offset;
                     }
                 } else {
-                    // [수정] Issue 1 해결: 셀이 비었거나 공백만 있는 경우 처리
                     const rawText = text.substring(cellStart, cellEnd);
-                    // 파이프(|)와 공백을 제외한 문자가 있는지 확인
                     const nonSpaceIdx = rawText.search(/[^ \t|]/);
 
                     if (nonSpaceIdx !== -1) {
-                        // 공백이나 파이프가 아닌 실제 문자가 혹시라도 있는 경우
                         innerStart = cellStart + nonSpaceIdx;
                         let lastIdx = rawText.length - 1;
                         while (lastIdx >= 0 && (rawText[lastIdx] === ' ' || rawText[lastIdx] === '\t' || rawText[lastIdx] === '|')) lastIdx--;
                         innerEnd = cellStart + lastIdx + 1;
                     } else if (cellEnd > cellStart) {
-                        // 공백만 존재하는 빈 셀: 장식(decoration)이 렌더링 될 수 있도록 가운데 1칸의 공백을 살림
                         const mid = Math.floor((cellStart + cellEnd) / 2);
                         innerStart = mid;
                         innerEnd = mid + 1;
                     } else {
-                        // 완전히 비어있는 경우 (예: || 와 같이 공백조차 없는 엣지 케이스)
                         innerStart = cellStart;
                         innerEnd = cellEnd;
                     }
                 }
 
-                // 현재 셀 내부의 순수 눈에 보이는(마커가 제외된) 글자 길이만 계산 (캐시 사용)
                 const len = visualLength(visibleTexts.get(cell) || '');
                 const diff = Math.max((colWidths[i] || 3) - len, 0);
 
-                // 콘텐츠(또는 살려둔 1칸 공백) 앞의 여백과 파이프 숨김
                 if (innerStart > cellStart) {
                     pushRange(cellStart, innerStart, 'hide', { blockId, activeRangeStart: start, activeRangeEnd: end });
                 }
-                // 콘텐츠 뒤의 여백과 파이프 숨김
                 if (innerEnd < cellEnd) {
                     pushRange(innerEnd, cellEnd, 'hide', { blockId, activeRangeStart: start, activeRangeEnd: end });
                 }
 
-                // 실제 콘텐츠 영역에 테이블 셀 장식 적용
                 pushRange(innerStart, innerEnd, 'tableCell', {
                     blockId,
                     metadata: { diff, align: node.align?.[i], empty: cell.children.length === 0, isHeader: rowIndex === 0 },
@@ -374,6 +427,10 @@ export class MarkdownParser {
         });
     }
 
+    /**
+     * Process unordered list items.
+     * Replaces the standard marker (-, *, +) with custom bullet decorations.
+     */
     private processListItem(node: ListItem, text: string, ancestors: Node[], pushRange: PushRangeFn, start: number, end: number) {
         const blockId = `item-${start}`;
 
@@ -407,6 +464,10 @@ export class MarkdownParser {
         }
     }
 
+    /**
+     * Process blockquotes (> text).
+     * Applies a vertical bar styling to the markers and a background to the content.
+     */
     private processBlockquote(text: string, pushRange: PushRangeFn, start: number, end: number, ancestors: Node[]) {
         // Handle nesting by only processing at the root blockquote level to avoid duplicate marker logic
         if (ancestors.some(a => a.type === 'blockquote')) { return; }
@@ -455,6 +516,10 @@ export class MarkdownParser {
         }
     }
 
+    /**
+     * Process horizontal rules (---, ***, etc.).
+     * Hides the marker and renders a custom horizontal line.
+     */
     private processHR(pushRange: PushRangeFn, start: number, end: number) {
         pushRange(start, end, 'hide');
         pushRange(start, end, 'hr');
